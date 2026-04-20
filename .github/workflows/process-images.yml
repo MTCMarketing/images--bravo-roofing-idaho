@@ -1,10 +1,11 @@
+# version 2
+
 name: Process Uploaded Images
 
 on:
   push:
     paths:
       - "originals/**"
-      - "delete-queue/**"
 
 permissions:
   contents: write
@@ -34,84 +35,37 @@ jobs:
           npm init -y
           npm install sharp
 
-      # ─────────────────────────────
-      # HANDLE DELETE QUEUE FIRST
-      # ─────────────────────────────
-      - name: Process delete queue
-        run: |
-          node <<'EOF'
-          const fs = require('fs');
-          const path = require('path');
-
-          const queueDir = path.join(process.cwd(), 'delete-queue');
-          const imagesDir = path.join(process.cwd(), 'images');
-          const filesJsonPath = path.join(imagesDir, 'files.json');
-
-          if (!fs.existsSync(queueDir)) {
-            console.log("No delete queue");
-            process.exit(0);
-          }
-
-          let filesJson = {};
-          if (fs.existsSync(filesJsonPath)) {
-            filesJson = JSON.parse(fs.readFileSync(filesJsonPath, 'utf-8'));
-          }
-
-          const queueFiles = fs.readdirSync(queueDir);
-
-          queueFiles.forEach(file => {
-            const fullPath = path.join(queueDir, file);
-
-            try {
-              const payload = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-              const id = payload.id;
-
-              if (!id) return;
-
-              // 🔥 FIXED LOOKUP (handles mismatch)
-              const entryKey = Object.keys(filesJson).find(k => {
-                const name = filesJson[k]?.name || "";
-                return k === id || name.startsWith(id);
-              });
-
-              if (!entryKey) {
-                console.log("Not found in files.json:", id);
-                console.log("Available keys:", Object.keys(filesJson).slice(0, 5));
-              } else {
-                const entry = filesJson[entryKey];
-                const fileName = entry.name;
-                const imagePath = path.join(imagesDir, fileName);
-
-                if (fs.existsSync(imagePath)) {
-                  fs.unlinkSync(imagePath);
-                  console.log("Deleted image:", fileName);
-                } else {
-                  console.log("File missing on disk:", fileName);
-                }
-
-                delete filesJson[entryKey];
-              }
-
-              fs.unlinkSync(fullPath);
-              console.log("Processed queue:", file);
-
-            } catch (err) {
-              console.log("Error processing:", file, err.message);
-            }
-          });
-
-          fs.writeFileSync(filesJsonPath, JSON.stringify(filesJson, null, 2));
-          console.log("files.json updated after deletes");
-          EOF
-
-      # ─────────────────────────────
-      # NORMAL IMAGE PROCESSING
-      # ─────────────────────────────
       - name: Get changed files
         id: changed
         run: |
           FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | tr '\n' ' ')
           echo "FILES=$FILES" >> $GITHUB_OUTPUT
+
+      # 🔥 NEW STEP — VALIDATE FILES EXIST IN /originals
+      - name: Validate changed files exist in originals
+        if: steps.changed.outputs.FILES != ''
+        run: |
+          echo "Checking that changed files exist in /originals..."
+
+          for file in ${{ steps.changed.outputs.FILES }}
+          do
+            echo "Checking: $file"
+
+            if [[ "$file" == originals/* ]]; then
+              if [ ! -f "$file" ]; then
+                echo "❌ FAIL: File listed in diff but does not exist: $file"
+                exit 1
+              else
+                echo "✅ OK: $file exists"
+              fi
+            else
+              echo "⚠️ Skipping non-originals file: $file"
+            fi
+          done
+
+      - name: Skip if no relevant files
+        if: steps.changed.outputs.FILES == ''
+        run: echo "No changed files. Skipping."
 
       - name: Convert only changed images
         if: steps.changed.outputs.FILES != ''
@@ -133,41 +87,42 @@ jobs:
 
           const data = JSON.parse(fs.readFileSync(FILE_PATH, 'utf-8'));
 
+          const now = Date.now();
+
           const repo = process.env.GITHUB_REPOSITORY.split('/')[1];
           const owner = process.env.GITHUB_REPOSITORY.split('/')[0];
-          const baseUrl = `https://${owner.toLowerCase()}.github.io/${repo}`;
+          const ownerLower = owner.toLowerCase();
+
+          const baseUrl = `https://${ownerLower}.github.io/${repo}`;
 
           const imagesDir = path.join(process.cwd(), 'images');
           const files = fs.readdirSync(imagesDir).filter(f => f.endsWith('.webp'));
 
-          files.forEach((file) => {
-            const id = file.replace('.webp', '');
+          files.forEach((file, index) => {
+            const key = now + index;
 
-            data[id] = {
+            data[key] = {
               path: `${baseUrl}/images/${file}`,
-              name: file,
+              name: file || `${now}.webp`,
               meta: {}
             };
           });
 
           fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2));
-          console.log("files.json rebuilt cleanly");
+          console.log("files.json updated with GitHub Pages URLs");
           EOF
 
-      - name: Commit changes
+      - name: Commit processed images + metadata
+        if: steps.changed.outputs.FILES != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add images
 
-          if [ -d delete-queue ]; then
-            git add delete-queue
-          fi
-
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Process images + deletes"
+            git commit -m "Add processed images + metadata"
             git push
           fi
