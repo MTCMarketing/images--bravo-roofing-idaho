@@ -1,4 +1,4 @@
-# version 3 
+# version 2
 
 name: Process Uploaded Images
 
@@ -45,90 +45,51 @@ jobs:
         if: steps.changed.outputs.FILES == ''
         run: echo "No changed files. Skipping."
 
-      # ---------------------------------------
-      # PROCESS IMAGES (existing JS untouched)
-      # ---------------------------------------
       - name: Convert only changed images
         if: steps.changed.outputs.FILES != ''
         run: |
           node process-images.js ${{ steps.changed.outputs.FILES }}
 
-      # ---------------------------------------
-      # FIX FILENAMES → FORCE TIMESTAMP.webp
-      # ---------------------------------------
-      - name: Normalize filenames
-        if: steps.changed.outputs.FILES != ''
-        run: |
-          cd images
-
-          for file in *.webp; do
-            # extract leading timestamp
-            TS=$(echo "$file" | sed -E 's/^([0-9]+).*/\1/')
-
-            if [ "$file" != "$TS.webp" ]; then
-              echo "Renaming $file → $TS.webp"
-              mv "$file" "$TS.webp"
-            fi
-          done
-
-      # ---------------------------------------
-      # HANDLE DELETES (from originals → images)
-      # ---------------------------------------
-      - name: Sync deletes to images folder
-        if: steps.changed.outputs.FILES != ''
-        run: |
-          for file in ${{ steps.changed.outputs.FILES }}; do
-            if [ ! -f "$file" ]; then
-              NAME=$(basename "$file")
-              TS=$(echo "$NAME" | sed -E 's/^([0-9]+).*/\1/')
-              TARGET="images/$TS.webp"
-
-              if [ -f "$TARGET" ]; then
-                echo "Deleting $TARGET"
-                rm "$TARGET"
-              fi
-            fi
-          done
-
-      # ---------------------------------------
-      # REBUILD files.json CLEANLY
-      # ---------------------------------------
-      - name: Rebuild files.json
+      - name: Update files.json
         if: steps.changed.outputs.FILES != ''
         run: |
           node <<'EOF'
           const fs = require('fs');
           const path = require('path');
 
-          const imagesDir = path.join(process.cwd(), 'images');
-          const filePath = path.join(imagesDir, 'files.json');
+          const FILE_PATH = path.join(process.cwd(), 'images', 'files.json');
+
+          if (!fs.existsSync(FILE_PATH)) {
+            fs.writeFileSync(FILE_PATH, JSON.stringify({}, null, 2));
+          }
+
+          const data = JSON.parse(fs.readFileSync(FILE_PATH, 'utf-8'));
+
+          const now = Date.now();
 
           const repo = process.env.GITHUB_REPOSITORY.split('/')[1];
-          const owner = process.env.GITHUB_REPOSITORY.split('/')[0].toLowerCase();
-          const baseUrl = `https://${owner}.github.io/${repo}`;
+          const owner = process.env.GITHUB_REPOSITORY.split('/')[0];
+          const ownerLower = owner.toLowerCase();
 
-          const files = fs.readdirSync(imagesDir)
-            .filter(f => f.endsWith('.webp'));
+          const baseUrl = `https://${ownerLower}.github.io/${repo}`;
 
-          const data = {};
+          const imagesDir = path.join(process.cwd(), 'images');
+          const files = fs.readdirSync(imagesDir).filter(f => f.endsWith('.webp'));
 
-          files.forEach(file => {
-            const key = file.replace('.webp', '');
+          files.forEach((file, index) => {
+            const key = now + index;
 
             data[key] = {
               path: `${baseUrl}/images/${file}`,
-              name: file,
+              name: file || `${now}.webp`,
               meta: {}
             };
           });
 
-          fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-          console.log("files.json rebuilt cleanly");
+          fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2));
+          console.log("files.json updated with GitHub Pages URLs");
           EOF
 
-      # ---------------------------------------
-      # COMMIT
-      # ---------------------------------------
       - name: Commit processed images + metadata
         if: steps.changed.outputs.FILES != ''
         run: |
@@ -140,6 +101,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Fix image processing (names + deletes + metadata)"
+            git commit -m "Add processed images + metadata"
             git push
           fi
