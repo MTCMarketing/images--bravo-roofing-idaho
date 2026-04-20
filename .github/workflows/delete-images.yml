@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Process changes (DELETE + UPDATE - DRY RUN)
+      - name: Process changes (DELETE + UPDATE + RENAME - DRY RUN)
         run: |
           node <<'EOF'
           const fs = require('fs');
@@ -32,15 +32,12 @@ jobs:
           const imagesDir = path.join(process.cwd(), 'images');
           const filesJsonPath = path.join(imagesDir, 'files.json');
 
-          if (!fs.existsSync(queueDir)) {
-            console.log("No delete-queue folder");
-            process.exit(0);
-          }
+          const repo = process.env.GITHUB_REPOSITORY.split('/')[1];
+          const owner = process.env.GITHUB_REPOSITORY.split('/')[0];
+          const baseUrl = `https://${owner.toLowerCase()}.github.io/${repo}`;
 
-          if (!fs.existsSync(filesJsonPath)) {
-            console.log("files.json missing");
-            process.exit(1);
-          }
+          if (!fs.existsSync(queueDir)) process.exit(0);
+          if (!fs.existsSync(filesJsonPath)) process.exit(1);
 
           const originalData = JSON.parse(fs.readFileSync(filesJsonPath, 'utf-8'));
           const testData = JSON.parse(JSON.stringify(originalData));
@@ -48,96 +45,74 @@ jobs:
           const queueFiles = fs.readdirSync(queueDir)
             .filter(f => f.startsWith('batch-') && f.endsWith('.json'));
 
-          if (queueFiles.length === 0) {
-            console.log("No batch files found");
-            process.exit(0);
-          }
-
           let logLines = [];
 
           queueFiles.forEach(file => {
-            const fullPath = path.join(queueDir, file);
+            const payload = JSON.parse(fs.readFileSync(path.join(queueDir, file), 'utf-8'));
 
-            try {
-              const payload = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+            if (!Array.isArray(payload.changes)) return;
 
-              if (!Array.isArray(payload.changes)) {
-                console.log("Skipping invalid batch:", file);
+            payload.changes.forEach(change => {
+
+              const id = String(change.id || "");
+
+              const entryKey = Object.keys(testData).find(k => {
+                const name = testData[k]?.name || "";
+                return k === id || name.startsWith(id);
+              });
+
+              if (!entryKey) {
+                logLines.push(`No match for ID: ${id}`);
                 return;
               }
 
-              payload.changes.forEach(change => {
+              // =====================
+              // DELETE
+              // =====================
+              if (change.action === 'delete') {
+                logLines.push(`Would delete: ${testData[entryKey].name}`);
+                delete testData[entryKey];
+              }
 
-                // =====================
-                // DELETE
-                // =====================
-                if (change.action === 'delete' && change.id) {
-                  const id = String(change.id);
+              // =====================
+              // UPDATE
+              // =====================
+              else if (change.action === 'update' && change.attribute) {
+                logLines.push(`Would update: ${testData[entryKey].name} → ${change.attribute}`);
+                testData[entryKey][change.attribute] = change.value;
+              }
 
-                  const matches = Object.keys(testData).filter(k => {
-                    const name = testData[k]?.name || "";
-                    return k === id || name.startsWith(id);
-                  });
+              // =====================
+              // RENAME
+              // =====================
+              else if (change.action === 'rename' && change.value) {
+                const newName = change.value;
 
-                  if (matches.length === 0) {
-                    logLines.push(`No match for DELETE ID: ${id}`);
-                  }
+                logLines.push(`Would rename: ${testData[entryKey].name} → ${newName}`);
 
-                  matches.forEach(key => {
-                    logLines.push(`Would delete: ${testData[key].name}`);
-                    delete testData[key];
-                  });
-                }
+                // simulate rename in JSON
+                testData[entryKey].name = newName;
+                testData[entryKey].path = `${baseUrl}/images/${newName}`;
+              }
 
-                // =====================
-                // UPDATE
-                // =====================
-                else if (change.action === 'update' && change.id && change.attribute) {
-                  const id = String(change.id);
+              else {
+                logLines.push(`Skipping invalid change: ${JSON.stringify(change)}`);
+              }
 
-                  const entryKey = Object.keys(testData).find(k => {
-                    const name = testData[k]?.name || "";
-                    return k === id || name.startsWith(id);
-                  });
-
-                  if (!entryKey) {
-                    logLines.push(`No match for UPDATE ID: ${id}`);
-                    return;
-                  }
-
-                  const attr = change.attribute;
-                  const value = change.value;
-
-                  logLines.push(`Would update: ${testData[entryKey].name} → ${attr}`);
-
-                  // 🔥 Apply update
-                  testData[entryKey][attr] = value;
-                }
-
-                else {
-                  console.log("Skipping invalid change:", change);
-                }
-
-              });
-
-            } catch (err) {
-              console.log("Error reading batch:", file, err.message);
-            }
+            });
           });
 
-          // =====================
           // WRITE LOG
-          // =====================
-          const logPath = path.join(queueDir, '_dry-run-log.txt');
-          fs.writeFileSync(logPath, logLines.join('\n') || 'No changes applied');
-          console.log("Wrote log:", logPath);
+          fs.writeFileSync(
+            path.join(queueDir, '_dry-run-log.txt'),
+            logLines.join('\n') || 'No changes'
+          );
 
-          // =====================
           // WRITE TEST JSON
-          // =====================
-          const testJsonPath = path.join(queueDir, 'files-test.json');
-          fs.writeFileSync(testJsonPath, JSON.stringify(testData, null, 2));
-          console.log("Wrote test JSON:", testJsonPath);
+          fs.writeFileSync(
+            path.join(queueDir, 'files-test.json'),
+            JSON.stringify(testData, null, 2)
+          );
 
           EOF
 
@@ -151,6 +126,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Dry run delete + update changes"
+            git commit -m "Dry run delete + update + rename"
             git push origin HEAD:${{ github.ref_name }}
           fi
