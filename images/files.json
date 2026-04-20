@@ -37,9 +37,11 @@
     "meta": {}
   },
   "1776715165647": {
-    "path": "https://mtcmarketing.github.io/images--bravo-roofing-idaho/images/1776670794737-cuisine3.webp",
-    "name": "1776670794737-cuisine3.webp",
-    "meta": {}
+    "path": "https://mtcmarketing.github.io/images--bravo-roofing-idaho/images/best-food-image.webp",
+    "name": "best-food-image.webp",
+    "meta": {
+      "alt": "Here is the best food money can buy."
+    }
   },
   "1776715165648": {
     "path": "https://mtcmarketing.github.io/images--bravo-roofing-idaho/images/1776709289292-img_0058.webp",
