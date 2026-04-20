@@ -4,6 +4,8 @@
        "value" : 1,
       "whatever" : "i want"
       
-    }}
+    }},
+
+    { "action": "delete", "id": "1776581395549" }
   ]
 }
