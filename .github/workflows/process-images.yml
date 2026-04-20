@@ -84,7 +84,7 @@ jobs:
                 delete filesJson[id];
               }
 
-              fs.unlinkSync(fullPath); // remove queue file
+              fs.unlinkSync(fullPath);
               console.log("Processed queue:", file);
 
             } catch (err) {
@@ -151,7 +151,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add images delete-queue
+          git add images
+
+          if [ -d delete-queue ]; then
+            git add delete-queue
+          fi
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
