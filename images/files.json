@@ -17,7 +17,9 @@
   "1776709307708": {
     "path": "https://mtcmarketing.github.io/images--bravo-roofing-idaho/images/1776670712867-cuisine1.webp",
     "name": "1776670712867-cuisine1.webp",
-    "meta": {}
+    "meta": {
+      "alt": "testing"
+    }
   },
   "1776709307709": {
     "path": "https://mtcmarketing.github.io/images--bravo-roofing-idaho/images/1776670794737-cuisine3.webp",
