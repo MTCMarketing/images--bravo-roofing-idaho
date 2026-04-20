@@ -1,5 +1,9 @@
 {
   "changes": [
-    { "action": "delete", "id": "1776584939865" }
+    { "action": "update", "id": "1776584939865", "attribute" : "meta", "value" : {
+       "value" : 1,
+      "whatever" : "i want"
+      
+    }}
   ]
 }
