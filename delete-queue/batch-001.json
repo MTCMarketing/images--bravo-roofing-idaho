@@ -1,6 +1,6 @@
 {
-"action" : "delete",
-"files" : [
-  "delete-queue/test4.json"
-]
+  "changes": [
+    { "action": "delete", "file": "images/1776581395549.webp" },
+    { "action": "delete", "file": "images/1776584285077.webp" }
+  ]
 }
