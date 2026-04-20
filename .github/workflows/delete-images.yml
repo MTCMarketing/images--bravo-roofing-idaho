@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Process batch delete (NEW FORMAT - DRY RUN)
+      - name: Process batch delete (ID BASED - DRY RUN)
         run: |
           node <<'EOF'
           const fs = require('fs');
@@ -62,27 +62,26 @@ jobs:
               const payload = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
 
               if (!Array.isArray(payload.changes)) {
-                console.log("Skipping invalid batch (no changes array):", file);
+                console.log("Skipping invalid batch:", file);
                 return;
               }
 
               payload.changes.forEach(change => {
-                if (change.action !== 'delete' || !change.file) {
+                if (change.action !== 'delete' || !change.id) {
                   console.log("Skipping invalid change:", change);
                   return;
                 }
 
-                // normalize "images/xyz.webp" → "xyz"
-                const fileName = change.file.replace(/^images\//, '');
-                const base = fileName.replace(/\.webp$/, '');
+                const id = String(change.id);
 
+                // 🔥 Match by ID (key OR filename)
                 const matches = Object.keys(testData).filter(k => {
                   const name = testData[k]?.name || "";
-                  return name.startsWith(base);
+                  return k === id || name.startsWith(id);
                 });
 
                 if (matches.length === 0) {
-                  logLines.push(`No match for: ${fileName}`);
+                  logLines.push(`No match for ID: ${id}`);
                 }
 
                 matches.forEach(key => {
@@ -116,6 +115,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Dry run delete queue (new format)"
+            git commit -m "Dry run delete queue (ID based)"
             git push origin HEAD:${{ github.ref_name }}
           fi
