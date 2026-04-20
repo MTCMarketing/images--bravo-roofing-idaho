@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Process batch delete (ID BASED - DRY RUN)
+      - name: Process changes (DELETE + UPDATE - DRY RUN)
         run: |
           node <<'EOF'
           const fs = require('fs');
@@ -67,27 +67,57 @@ jobs:
               }
 
               payload.changes.forEach(change => {
-                if (change.action !== 'delete' || !change.id) {
+
+                // =====================
+                // DELETE
+                // =====================
+                if (change.action === 'delete' && change.id) {
+                  const id = String(change.id);
+
+                  const matches = Object.keys(testData).filter(k => {
+                    const name = testData[k]?.name || "";
+                    return k === id || name.startsWith(id);
+                  });
+
+                  if (matches.length === 0) {
+                    logLines.push(`No match for DELETE ID: ${id}`);
+                  }
+
+                  matches.forEach(key => {
+                    logLines.push(`Would delete: ${testData[key].name}`);
+                    delete testData[key];
+                  });
+                }
+
+                // =====================
+                // UPDATE
+                // =====================
+                else if (change.action === 'update' && change.id && change.attribute) {
+                  const id = String(change.id);
+
+                  const entryKey = Object.keys(testData).find(k => {
+                    const name = testData[k]?.name || "";
+                    return k === id || name.startsWith(id);
+                  });
+
+                  if (!entryKey) {
+                    logLines.push(`No match for UPDATE ID: ${id}`);
+                    return;
+                  }
+
+                  const attr = change.attribute;
+                  const value = change.value;
+
+                  logLines.push(`Would update: ${testData[entryKey].name} → ${attr}`);
+
+                  // 🔥 Apply update
+                  testData[entryKey][attr] = value;
+                }
+
+                else {
                   console.log("Skipping invalid change:", change);
-                  return;
                 }
 
-                const id = String(change.id);
-
-                // 🔥 Match by ID (key OR filename)
-                const matches = Object.keys(testData).filter(k => {
-                  const name = testData[k]?.name || "";
-                  return k === id || name.startsWith(id);
-                });
-
-                if (matches.length === 0) {
-                  logLines.push(`No match for ID: ${id}`);
-                }
-
-                matches.forEach(key => {
-                  logLines.push(`Would delete: ${testData[key].name}`);
-                  delete testData[key];
-                });
               });
 
             } catch (err) {
@@ -95,10 +125,16 @@ jobs:
             }
           });
 
+          // =====================
+          // WRITE LOG
+          // =====================
           const logPath = path.join(queueDir, '_dry-run-log.txt');
-          fs.writeFileSync(logPath, logLines.join('\n') || 'No matches found');
+          fs.writeFileSync(logPath, logLines.join('\n') || 'No changes applied');
           console.log("Wrote log:", logPath);
 
+          // =====================
+          // WRITE TEST JSON
+          // =====================
           const testJsonPath = path.join(queueDir, 'files-test.json');
           fs.writeFileSync(testJsonPath, JSON.stringify(testData, null, 2));
           console.log("Wrote test JSON:", testJsonPath);
@@ -115,6 +151,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Dry run delete queue (ID based)"
+            git commit -m "Dry run delete + update changes"
             git push origin HEAD:${{ github.ref_name }}
           fi
