@@ -1,4 +1,4 @@
-name: Process Delete Queue (DRY RUN)
+name: Process Delete Queue (REAL)
 
 on:
   push:
@@ -22,11 +22,12 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Process changes (DELETE + UPDATE + RENAME - DRY RUN)
+      - name: Apply changes (DELETE + UPDATE + RENAME)
         run: |
           node <<'EOF'
           const fs = require('fs');
           const path = require('path');
+          const { execSync } = require('child_process');
 
           const queueDir = path.join(process.cwd(), 'delete-queue');
           const imagesDir = path.join(process.cwd(), 'images');
@@ -39,8 +40,7 @@ jobs:
           if (!fs.existsSync(queueDir)) process.exit(0);
           if (!fs.existsSync(filesJsonPath)) process.exit(1);
 
-          const originalData = JSON.parse(fs.readFileSync(filesJsonPath, 'utf-8'));
-          const testData = JSON.parse(JSON.stringify(originalData));
+          const data = JSON.parse(fs.readFileSync(filesJsonPath, 'utf-8'));
 
           const queueFiles = fs.readdirSync(queueDir)
             .filter(f => f.startsWith('batch-') && f.endsWith('.json'));
@@ -56,8 +56,8 @@ jobs:
 
               const id = String(change.id || "");
 
-              const entryKey = Object.keys(testData).find(k => {
-                const name = testData[k]?.name || "";
+              const entryKey = Object.keys(data).find(k => {
+                const name = data[k]?.name || "";
                 return k === id || name.startsWith(id);
               });
 
@@ -66,20 +66,29 @@ jobs:
                 return;
               }
 
+              const entry = data[entryKey];
+              const oldName = entry.name;
+              const oldPath = path.join(imagesDir, oldName);
+
               // =====================
               // DELETE
               // =====================
               if (change.action === 'delete') {
-                logLines.push(`Would delete: ${testData[entryKey].name}`);
-                delete testData[entryKey];
+                logLines.push(`Deleting: ${oldName}`);
+
+                if (fs.existsSync(oldPath)) {
+                  fs.unlinkSync(oldPath);
+                }
+
+                delete data[entryKey];
               }
 
               // =====================
               // UPDATE
               // =====================
               else if (change.action === 'update' && change.attribute) {
-                logLines.push(`Would update: ${testData[entryKey].name} → ${change.attribute}`);
-                testData[entryKey][change.attribute] = change.value;
+                logLines.push(`Updating: ${oldName} → ${change.attribute}`);
+                data[entryKey][change.attribute] = change.value;
               }
 
               // =====================
@@ -87,12 +96,18 @@ jobs:
               // =====================
               else if (change.action === 'rename' && change.value) {
                 const newName = change.value;
+                const newPath = path.join(imagesDir, newName);
 
-                logLines.push(`Would rename: ${testData[entryKey].name} → ${newName}`);
+                logLines.push(`Renaming: ${oldName} → ${newName}`);
 
-                // simulate rename in JSON
-                testData[entryKey].name = newName;
-                testData[entryKey].path = `${baseUrl}/images/${newName}`;
+                if (fs.existsSync(oldPath)) {
+                  execSync(`git mv "${oldPath}" "${newPath}"`);
+                } else {
+                  logLines.push(`⚠️ File missing: ${oldName}`);
+                }
+
+                data[entryKey].name = newName;
+                data[entryKey].path = `${baseUrl}/images/${newName}`;
               }
 
               else {
@@ -100,32 +115,32 @@ jobs:
               }
 
             });
+
+            // 🔥 REMOVE PROCESSED BATCH FILE
+            fs.unlinkSync(path.join(queueDir, file));
           });
+
+          // SAVE UPDATED JSON
+          fs.writeFileSync(filesJsonPath, JSON.stringify(data, null, 2));
 
           // WRITE LOG
           fs.writeFileSync(
-            path.join(queueDir, '_dry-run-log.txt'),
+            path.join(queueDir, '_last-run-log.txt'),
             logLines.join('\n') || 'No changes'
-          );
-
-          // WRITE TEST JSON
-          fs.writeFileSync(
-            path.join(queueDir, 'files-test.json'),
-            JSON.stringify(testData, null, 2)
           );
 
           EOF
 
-      - name: Commit dry run results
+      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add delete-queue/_dry-run-log.txt delete-queue/files-test.json || true
+          git add images delete-queue || true
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Dry run delete + update + rename"
+            git commit -m "Apply delete/update/rename changes"
             git push origin HEAD:${{ github.ref_name }}
           fi
