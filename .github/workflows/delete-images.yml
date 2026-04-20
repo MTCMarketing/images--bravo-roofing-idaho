@@ -1,38 +1,76 @@
-name: Process Delete Queue (TEST)
+- name: Process batch delete (DRY RUN)
+  run: |
+    node <<'EOF'
+    const fs = require('fs');
+    const path = require('path');
 
-on:
-  push:
-    paths:
-      - "delete-queue/**"
+    const queueDir = path.join(process.cwd(), 'delete-queue');
+    const imagesDir = path.join(process.cwd(), 'images');
+    const filesJsonPath = path.join(imagesDir, 'files.json');
 
-permissions:
-  contents: write
+    if (!fs.existsSync(queueDir)) {
+      console.log("No delete-queue folder");
+      process.exit(0);
+    }
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+    if (!fs.existsSync(filesJsonPath)) {
+      console.log("files.json missing");
+      process.exit(1);
+    }
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
+    const originalData = JSON.parse(fs.readFileSync(filesJsonPath, 'utf-8'));
+    const testData = JSON.parse(JSON.stringify(originalData)); // deep copy
 
-      - name: Write test file
-        run: |
-          mkdir -p delete-queue
-          echo "I was triggered by delete-queue at $(date)" > delete-queue/_ran.txt
+    const queueFiles = fs.readdirSync(queueDir).filter(f => f.startsWith('batch-') && f.endsWith('.json'));
 
-      - name: Commit test file
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+    if (queueFiles.length === 0) {
+      console.log("No batch files found");
+      process.exit(0);
+    }
 
-          git add delete-queue/_ran.txt
+    let logLines = [];
 
-          if git diff --cached --quiet; then
-            echo "No changes"
-          else
-            git commit -m "Test: delete-queue workflow ran"
-            git push origin HEAD:${{ github.ref_name }}
-          fi
+    queueFiles.forEach(file => {
+      const fullPath = path.join(queueDir, file);
+
+      try {
+        const payload = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+
+        if (payload.action !== 'delete' || !Array.isArray(payload.files)) {
+          console.log("Skipping invalid batch:", file);
+          return;
+        }
+
+        payload.files.forEach(pattern => {
+          // normalize "images/xyz*" → "xyz"
+          const clean = pattern.replace(/^images\//, '').replace('*', '');
+
+          const matches = Object.keys(testData).filter(k => {
+            const name = testData[k]?.name || "";
+            return name.startsWith(clean);
+          });
+
+          matches.forEach(key => {
+            logLines.push(`Would delete: ${testData[key].name}`);
+            delete testData[key];
+          });
+        });
+
+      } catch (err) {
+        console.log("Error reading batch:", file, err.message);
+      }
+    });
+
+    // 🧾 WRITE LOG FILE
+    const logPath = path.join(queueDir, '_dry-run-log.txt');
+    fs.writeFileSync(logPath, logLines.join('\n') || 'No matches found');
+
+    console.log("Wrote log:", logPath);
+
+    // 🧪 WRITE TEST JSON
+    const testJsonPath = path.join(queueDir, 'files-test.json');
+    fs.writeFileSync(testJsonPath, JSON.stringify(testData, null, 2));
+
+    console.log("Wrote test JSON:", testJsonPath);
+
+    EOF
