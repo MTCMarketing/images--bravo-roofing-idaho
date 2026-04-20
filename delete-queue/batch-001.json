@@ -1,6 +1,6 @@
 {
   "changes": [
-    { "action": "delete", "file": "images/1776581395549.webp" },
-    { "action": "delete", "file": "images/1776584285077.webp" }
+    { "action": "delete", "id": "1776581395549" },
+    { "action": "delete", "id": "1776584285077" }
   ]
 }
