@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Process batch delete (DRY RUN)
+      - name: Process batch delete (NEW FORMAT - DRY RUN)
         run: |
           node <<'EOF'
           const fs = require('fs');
@@ -61,20 +61,29 @@ jobs:
             try {
               const payload = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
 
-              if (payload.action !== 'delete' || !Array.isArray(payload.files)) {
-                console.log("Skipping invalid batch:", file);
+              if (!Array.isArray(payload.changes)) {
+                console.log("Skipping invalid batch (no changes array):", file);
                 return;
               }
 
-              payload.files.forEach(pattern => {
-                const clean = pattern
-                  .replace(/^images\//, '')
-                  .replace('*', '');
+              payload.changes.forEach(change => {
+                if (change.action !== 'delete' || !change.file) {
+                  console.log("Skipping invalid change:", change);
+                  return;
+                }
+
+                // normalize "images/xyz.webp" → "xyz"
+                const fileName = change.file.replace(/^images\//, '');
+                const base = fileName.replace(/\.webp$/, '');
 
                 const matches = Object.keys(testData).filter(k => {
                   const name = testData[k]?.name || "";
-                  return name.startsWith(clean);
+                  return name.startsWith(base);
                 });
+
+                if (matches.length === 0) {
+                  logLines.push(`No match for: ${fileName}`);
+                }
 
                 matches.forEach(key => {
                   logLines.push(`Would delete: ${testData[key].name}`);
@@ -94,6 +103,7 @@ jobs:
           const testJsonPath = path.join(queueDir, 'files-test.json');
           fs.writeFileSync(testJsonPath, JSON.stringify(testData, null, 2));
           console.log("Wrote test JSON:", testJsonPath);
+
           EOF
 
       - name: Commit dry run results
@@ -106,6 +116,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Dry run delete queue results"
+            git commit -m "Dry run delete queue (new format)"
             git push origin HEAD:${{ github.ref_name }}
           fi
