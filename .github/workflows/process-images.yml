@@ -68,20 +68,28 @@ jobs:
 
               if (!id) return;
 
-              const entry = filesJson[id];
+              // 🔥 FIXED LOOKUP (handles mismatch)
+              const entryKey = Object.keys(filesJson).find(k => {
+                const name = filesJson[k]?.name || "";
+                return k === id || name.startsWith(id);
+              });
 
-              if (!entry) {
+              if (!entryKey) {
                 console.log("Not found in files.json:", id);
+                console.log("Available keys:", Object.keys(filesJson).slice(0, 5));
               } else {
+                const entry = filesJson[entryKey];
                 const fileName = entry.name;
                 const imagePath = path.join(imagesDir, fileName);
 
                 if (fs.existsSync(imagePath)) {
                   fs.unlinkSync(imagePath);
                   console.log("Deleted image:", fileName);
+                } else {
+                  console.log("File missing on disk:", fileName);
                 }
 
-                delete filesJson[id];
+                delete filesJson[entryKey];
               }
 
               fs.unlinkSync(fullPath);
