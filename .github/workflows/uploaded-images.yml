@@ -1,10 +1,4 @@
-# .github/workflows/process-uploaded-images.yml
-
-# version 3
-# Process Uploaded Images
-# Uses upload-queue/batch-*.json as the source of truth.
-# originals/ keeps raw uploaded files.
-# images/ stores processed webp + files.json.
+# .github/workflows/uploaded-images.yml
 
 name: Process Uploaded Images
 
@@ -158,6 +152,7 @@ jobs:
           node <<'EOF'
           const fs = require("fs");
           const path = require("path");
+          const https = require("https");
 
           const root = process.cwd();
           const imagesDir = path.join(root, "images");
@@ -167,62 +162,126 @@ jobs:
             fs.mkdirSync(imagesDir, { recursive: true });
           }
 
-          if (!fs.existsSync(filePath)) {
-            fs.writeFileSync(filePath, JSON.stringify({}, null, 2));
-          }
-
-          const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
-
           const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
           const baseUrl = `https://${owner.toLowerCase()}.github.io/${repo}`;
+          const remoteFilesJsonUrl = `${baseUrl}/images/files.json?v=${Date.now()}`;
 
-          const existingNames = new Set(
-            Object.values(data)
-              .map(entry => entry && entry.name)
-              .filter(Boolean)
-          );
+          function fetchRemoteJson(url) {
+            return new Promise((resolve) => {
+              https
+                .get(url, (res) => {
+                  if (res.statusCode !== 200) {
+                    res.resume();
+                    resolve(null);
+                    return;
+                  }
 
-          const existingPaths = new Set(
-            Object.values(data)
-              .map(entry => entry && entry.path)
-              .filter(Boolean)
-          );
+                  let raw = "";
+                  res.setEncoding("utf8");
 
-          const webpFiles = fs
-            .readdirSync(imagesDir)
-            .filter(file => file.endsWith(".webp"))
-            .sort();
+                  res.on("data", chunk => {
+                    raw += chunk;
+                  });
 
-          let added = 0;
-          let now = Date.now();
-
-          for (const file of webpFiles) {
-            const imagePath = `${baseUrl}/images/${file}`;
-
-            if (existingNames.has(file) || existingPaths.has(imagePath)) {
-              continue;
-            }
-
-            let key = String(now + added);
-
-            while (data[key]) {
-              now++;
-              key = String(now + added);
-            }
-
-            data[key] = {
-              path: imagePath,
-              name: file,
-              meta: {}
-            };
-
-            existingNames.add(file);
-            existingPaths.add(imagePath);
-            added++;
+                  res.on("end", () => {
+                    try {
+                      resolve(JSON.parse(raw));
+                    } catch {
+                      resolve(null);
+                    }
+                  });
+                })
+                .on("error", () => resolve(null));
+            });
           }
 
-          fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-          console.log(`files.json updated. Added ${added} new image records.`);
+          function readLocalJson(file) {
+            if (!fs.existsSync(file)) return {};
+            try {
+              const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                return parsed;
+              }
+            } catch {}
+            return {};
+          }
+
+          (async () => {
+            const localData = readLocalJson(filePath);
+            const remoteData = await fetchRemoteJson(remoteFilesJsonUrl);
+
+            let data = {};
+
+            if (
+              remoteData &&
+              typeof remoteData === "object" &&
+              !Array.isArray(remoteData)
+            ) {
+              data = { ...remoteData };
+              console.log(`Loaded existing remote files.json with ${Object.keys(remoteData).length} records.`);
+            } else {
+              console.log("No readable remote files.json found. Using local files.json only.");
+            }
+
+            data = {
+              ...data,
+              ...localData
+            };
+
+            const existingNames = new Set(
+              Object.values(data)
+                .map(entry => entry && entry.name)
+                .filter(Boolean)
+            );
+
+            const existingPaths = new Set(
+              Object.values(data)
+                .map(entry => entry && entry.path)
+                .filter(Boolean)
+            );
+
+            const webpFiles = fs
+              .readdirSync(imagesDir)
+              .filter(file => file.endsWith(".webp"))
+              .sort();
+
+            let added = 0;
+            let now = Date.now();
+
+            for (const file of webpFiles) {
+              const imagePath = `${baseUrl}/images/${file}`;
+
+              if (existingNames.has(file) || existingPaths.has(imagePath)) {
+                continue;
+              }
+
+              let key = String(now + added);
+
+              while (data[key]) {
+                now++;
+                key = String(now + added);
+              }
+
+              data[key] = {
+                path: imagePath,
+                name: file,
+                meta: {}
+              };
+
+              existingNames.add(file);
+              existingPaths.add(imagePath);
+              added++;
+            }
+
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+
+            console.log(`files.json updated.`);
+            console.log(`Total records now: ${Object.keys(data).length}`);
+            console.log(`New records added: ${added}`);
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
           EOF
 
       - name: Remove processed upload queue files
