@@ -1,244 +1,207 @@
-# .github/workflows/process-uploaded-images.yml
+import { STATIC_IMAGES } from "./static-images";
+import { getToken } from "../openbase/openbase";
+import { FILES_JSON_URL, UPLOAD_ENDPOINT, UPDATE_ENDPOINT } from "./keys";
 
-# version 3
-# Process Uploaded Images
-# Uses upload-queue/*.json as the exact processing list.
-# Keeps originals/ and upload-queue/ separate.
+// imageApi.ts
+// Single source of truth for all gallery images.
+//
+// fetchFiles() returns:
+//   1. CMS-uploaded images from files.json  (newest first, isStatic: false)
+//   2. Built-in static project images       (always present, isStatic: true)
+//
+// To swap the backend, replace bravoRoofingImageApi with a new object that
+// satisfies ImageApiAdapter — no component code changes needed (MTC-BRI-03).
 
-name: Process Uploaded Images
 
-on:
-  push:
-    paths:
-      - "originals/**"
-      - "upload-queue/**"
-  workflow_dispatch:
 
-permissions:
-  contents: write
 
-concurrency:
-  group: process-images-${{ github.ref_name }}
-  cancel-in-progress: false
+// ── Shared types ──────────────────────────────────────────────────────────────
+export type ImageRecord = {
+  id: string;
+  path: string;
+  name: string;
+  isStatic?: boolean;         // true = built-in image, cannot be deleted via CMS
+  meta?: Record<string, any>;
+};
 
-jobs:
-  process:
-    runs-on: ubuntu-latest
+export type UploadResult = {
+  webpUrl?: string;
+  downloadUrl?: string;
+  pagesUrl?: string;
+};
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-          persist-credentials: true
+// ── Unified change payload (MTC-BRI-18) ───────────────────────────────────────
+// Everything mutative — delete, rename, meta updates — flows through a single
+// batched endpoint. This is the discriminated union the worker accepts.
+export type ImageChange =
+  | { action: "delete"; id: string }
+  | { action: "rename"; id: string; value: string }
+  | { action: "update"; id: string; attribute: string; value: any };
 
-      - name: Pull latest branch before processing
-        run: |
-          git fetch origin ${{ github.ref_name }}
-          git reset --hard origin/${{ github.ref_name }}
+// ── Adapter contract ──────────────────────────────────────────────────────────
+export type ImageApiAdapter = {
+  fetchFiles: () => Promise<ImageRecord[]>;
+  uploadImage: (file: File, onProgress: (msg: string) => void) => Promise<UploadResult>;
+  // Unified batch mutation — apply one or more changes in a single request.
+  applyChanges: (changes: ImageChange[]) => Promise<void>;
+  // Convenience wrappers around applyChanges for common single-change flows.
+  deleteImage: (id: string) => Promise<void>;
+  renameImage: (id: string, newName: string) => Promise<void>;
+  updateMeta:  (id: string, meta: Record<string, any>) => Promise<void>;
+};
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
 
-      - name: Install sharp
-        run: |
-          npm init -y
-          npm install sharp
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      resolve(result.split(',')[1]); // strip data:image/... prefix
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
-      - name: Read upload queue
-        id: upload_queue
-        run: |
-          node <<'EOF'
-          const fs = require("fs");
-          const path = require("path");
+function sortByIdDesc(a: ImageRecord, b: ImageRecord): number {
+  const aTime = Number(String(a.id).split('-')[0]);
+  const bTime = Number(String(b.id).split('-')[0]);
+  return bTime - aTime;
+}
 
-          const queueDir = path.join(process.cwd(), "upload-queue");
+// ── Standard implementation ───────────────────────────────────────────────────
+export const bravoRoofingImageApi: ImageApiAdapter = {
+  async fetchFiles(): Promise<ImageRecord[]> {
+    let cmsRecords: ImageRecord[] = [];
 
-          if (!fs.existsSync(queueDir)) {
-            console.log("No upload-queue folder found.");
-            fs.writeFileSync("upload-files.txt", "");
-            fs.writeFileSync("upload-queue-files.txt", "");
-            process.exit(0);
-          }
+    try {
+      const res = await fetch(`${FILES_JSON_URL}?v=${Date.now()}`, {
+        headers: { Accept: 'application/json' },
+      });
 
-          const queueFiles = fs
-            .readdirSync(queueDir)
-            .filter(f => f.startsWith("batch-") && f.endsWith(".json"))
-            .sort();
+      if (res.ok) {
+        const json = await res.json();
+        cmsRecords = Object.entries(json ?? {}).map(([id, value]: [string, any]) => ({
+          id,
+          path: value?.path ?? '',
+          name: value?.name ?? id,
+          isStatic: false,
+          meta: value?.meta ?? {},
+        }));
+        cmsRecords.sort(sortByIdDesc);
+      }
+    } catch {
+      // Network failure — fall through and return static images only
+    }
 
-          const sources = [];
-          const queuePaths = [];
+    // CMS uploads first (newest), then built-in static images
+    return [...cmsRecords, ...STATIC_IMAGES];
+  },
 
-          for (const file of queueFiles) {
-            const fullPath = path.join(queueDir, file);
-            queuePaths.push(path.join("upload-queue", file));
+async uploadImage(file: File, onProgress: (msg: string) => void): Promise<UploadResult> {
+  // version 2.0
+  
+  onProgress(`Uploading ${file.name}…`);
 
-            let payload;
-            try {
-              payload = JSON.parse(fs.readFileSync(fullPath, "utf8"));
-            } catch (err) {
-              console.log(`Invalid JSON in ${file}: ${err.message}`);
-              continue;
-            }
+  const token = getToken();
 
-            if (!Array.isArray(payload.uploads)) {
-              console.log(`Skipping ${file}: uploads is not an array`);
-              continue;
-            }
+  if (!token) {
+    throw new Error("No auth token found");
+  }
 
-            for (const upload of payload.uploads) {
-              const source = String(upload.source || "");
+  const now = Date.now();
 
-              if (!source.startsWith("originals/")) {
-                console.log(`Skipping invalid source: ${source}`);
-                continue;
-              }
+  const safeOriginalName = file.name
+    .replace(/[^\w.\-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 
-              if (!fs.existsSync(path.join(process.cwd(), source))) {
-                console.log(`Missing source file: ${source}`);
-                continue;
-              }
+  const storedOriginalName = `${now}-${safeOriginalName}`;
+  const originalPath = `originals/${storedOriginalName}`;
+  const queuePath = `upload-queue/batch-${now}.json`;
 
-              if (!/\.(png|jpe?g|webp)$/i.test(source)) {
-                console.log(`Skipping unsupported file type: ${source}`);
-                continue;
-              }
+  const queuePayload = {
+    uploads: [
+      {
+        source: originalPath,
+        name: file.name,
+        meta: {}
+      }
+    ]
+  };
 
-              sources.push(source);
-            }
-          }
+  const base64 = await fileToBase64(file);
 
-          const uniqueSources = [...new Set(sources)];
+  const res = await fetch(UPLOAD_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      fileName: file.name,
+      base64,
+      originalPath,
+      queuePath,
+      queuePayload,
+    }),
+  });
 
-          fs.writeFileSync("upload-files.txt", uniqueSources.join("\n"));
-          fs.writeFileSync("upload-queue-files.txt", queuePaths.join("\n"));
+  const text = await res.text();
 
-          console.log("Queue files found:", queuePaths.length);
-          console.log("Upload sources found:", uniqueSources.length);
-          console.log(uniqueSources.join("\n") || "No valid upload sources.");
-          EOF
+  if (!res.ok) {
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
+    throw new Error(json?.error ?? text ?? `Upload failed (HTTP ${res.status})`);
+  }
 
-          FILES=$(cat upload-files.txt | tr '\n' ' ')
-          QUEUE_FILES=$(cat upload-queue-files.txt | tr '\n' ' ')
+  onProgress("Upload success!");
 
-          echo "FILES=$FILES" >> $GITHUB_OUTPUT
-          echo "QUEUE_FILES=$QUEUE_FILES" >> $GITHUB_OUTPUT
+  let json: any = null;
+  try { json = JSON.parse(text); } catch {}
+  return json ?? {};
+},
+  // Batched mutation endpoint. All delete/rename/meta flows end up here.
+  async applyChanges(changes: ImageChange[]): Promise<void> {
+    if (changes.length === 0) return;
 
-      - name: Skip if no queued uploads
-        if: steps.upload_queue.outputs.FILES == ''
-        run: echo "No queued uploads found. Skipping."
+    const token = getToken();
+    if (!token) throw new Error("No auth token found");
 
-      - name: Convert queued images
-        if: steps.upload_queue.outputs.FILES != ''
-        run: |
-          node process-images.js ${{ steps.upload_queue.outputs.FILES }}
+    const res = await fetch(UPDATE_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ changes }),
+    });
 
-      - name: Update files.json
-        if: steps.upload_queue.outputs.FILES != ''
-        run: |
-          node <<'EOF'
-          const fs = require("fs");
-          const path = require("path");
+    const text = await res.text();
 
-          const FILE_PATH = path.join(process.cwd(), "images", "files.json");
+    if (!res.ok) {
+      let json: any = null;
+      try { json = JSON.parse(text); } catch {}
+      throw new Error(
+        json?.error ??
+          json?.githubResponse?.message ??
+          json?.githubResponse?.error ??
+          text ??
+          `Update failed (HTTP ${res.status})`
+      );
+    }
+  },
 
-          if (!fs.existsSync(path.dirname(FILE_PATH))) {
-            fs.mkdirSync(path.dirname(FILE_PATH), { recursive: true });
-          }
+  async deleteImage(id: string): Promise<void> {
+    return this.applyChanges([{ action: "delete", id }]);
+  },
 
-          if (!fs.existsSync(FILE_PATH)) {
-            fs.writeFileSync(FILE_PATH, JSON.stringify({}, null, 2));
-          }
+  async renameImage(id: string, newName: string): Promise<void> {
+    return this.applyChanges([{ action: "rename", id, value: newName }]);
+  },
 
-          const data = JSON.parse(fs.readFileSync(FILE_PATH, "utf8"));
-
-          const repo = process.env.GITHUB_REPOSITORY.split("/")[1];
-          const owner = process.env.GITHUB_REPOSITORY.split("/")[0];
-          const baseUrl = `https://${owner.toLowerCase()}.github.io/${repo}`;
-
-          const imagesDir = path.join(process.cwd(), "images");
-
-          if (!fs.existsSync(imagesDir)) {
-            fs.mkdirSync(imagesDir, { recursive: true });
-          }
-
-          const existingNames = new Set(
-            Object.values(data)
-              .map(entry => entry && entry.name)
-              .filter(Boolean)
-          );
-
-          const existingPaths = new Set(
-            Object.values(data)
-              .map(entry => entry && entry.path)
-              .filter(Boolean)
-          );
-
-          const files = fs
-            .readdirSync(imagesDir)
-            .filter(f => f.endsWith(".webp"))
-            .sort();
-
-          let added = 0;
-          let now = Date.now();
-
-          for (const file of files) {
-            const imagePath = `${baseUrl}/images/${file}`;
-
-            if (existingNames.has(file) || existingPaths.has(imagePath)) {
-              continue;
-            }
-
-            let key = String(now + added);
-            while (data[key]) {
-              now++;
-              key = String(now + added);
-            }
-
-            data[key] = {
-              path: imagePath,
-              name: file,
-              meta: {}
-            };
-
-            existingNames.add(file);
-            existingPaths.add(imagePath);
-            added++;
-          }
-
-          fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2));
-          console.log(`files.json updated. Added ${added} new image records.`);
-          EOF
-
-      - name: Remove processed upload queue files
-        if: steps.upload_queue.outputs.FILES != ''
-        run: |
-          for file in ${{ steps.upload_queue.outputs.QUEUE_FILES }}
-          do
-            if [ -f "$file" ]; then
-              echo "Removing processed queue file: $file"
-              git rm "$file"
-            fi
-          done
-
-      - name: Commit processed images + metadata + queue cleanup
-        if: steps.upload_queue.outputs.FILES != ''
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add images upload-queue
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Process uploaded images"
-
-            git fetch origin ${{ github.ref_name }}
-            git pull --rebase origin ${{ github.ref_name }}
-
-            git push origin HEAD:${{ github.ref_name }}
-          fi
+  async updateMeta(id: string, meta: Record<string, any>): Promise<void> {
+    return this.applyChanges([{ action: "update", id, attribute: "meta", value: meta }]);
+  },
+};
